@@ -863,10 +863,12 @@ def test_rejects_non_bookable_showtime():
 
 def test_filters_real_listing_to_three_showtimes():
     # Aug 5 lists 7:45am, 11:30am, 3:15pm, 7:00pm, 10:45pm.
-    # Exactly the middle three survive.
+    # Exactly the middle three survive: 7:00pm is the inclusive upper boundary.
+    # Sorted because DOM order is not guaranteed chronological — late-night
+    # showings render in a separate showtimeMovieTimes--lateNight subtree.
     html = (FIXTURES / "listing_2026-08-05.html").read_text(encoding="utf-8", errors="replace")
     kept = [s for s in parse_showtimes(html) if showtime_in_window(s, date(2026, 8, 1))]
-    assert [s.display_time for s in kept] == ["11:30am", "3:15pm", "7:00pm"]
+    assert sorted(s.display_time for s in kept) == sorted(["11:30am", "3:15pm", "7:00pm"])
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
