@@ -45,13 +45,10 @@ def get(url: str, params: dict[str, str] | None = None) -> str:
             response.raise_for_status()
 
         if status >= 500:
-            try:
-                response.raise_for_status()
-            except Exception as error:  # noqa: BLE001 — 5xx is a genuine transient failure
-                last_error = error
-                if attempt < config.MAX_RETRIES - 1:
-                    time.sleep(config.REQUEST_DELAY_S * (attempt + 1))
-                continue
+            last_error = requests.HTTPError(f"HTTP {status} from {url}")
+            if attempt < config.MAX_RETRIES - 1:
+                time.sleep(config.REQUEST_DELAY_S * (attempt + 1))
+            continue
 
         time.sleep(config.REQUEST_DELAY_S)
         return response.text

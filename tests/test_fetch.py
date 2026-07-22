@@ -106,7 +106,7 @@ def test_5xx_is_retried(monkeypatch):
     monkeypatch.setattr(fetch.requests, "get", failing)
     monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(fetch.requests.HTTPError):
         fetch.get("https://example.test/")
     assert calls["n"] == config.MAX_RETRIES
 
