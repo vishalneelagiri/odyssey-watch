@@ -2,6 +2,8 @@
 import os
 from datetime import date, datetime, timedelta
 
+import requests
+
 from src import config, fetch, match, notify, parse, state
 from src.models import Alert, SeatPair, Showtime
 
@@ -21,18 +23,20 @@ def run(
     # Each date is isolated: a single Cloudflare interstitial or an empty page
     # for one date must not abort dates already parsed successfully.
     showtimes = []
+    listing_failed = False
     for offset in range(config.WINDOW_DAYS + 1):
         day = today + timedelta(days=offset)
         try:
             html = fetch.get(config.LISTING_URL, {"showDate": day.isoformat()})
             showtimes.extend(parse.parse_showtimes(html))
-        except Exception as exc:
+        except (OSError, requests.RequestException, ValueError) as exc:
+            listing_failed = True
             print(f"WARNING: listing fetch/parse failed for {day.isoformat()}: {exc}")
 
     if not showtimes:
         raise RuntimeError(
             "no IMAX 70mm showtimes parsed across the entire window — "
-            "markup has probably changed"
+            "either the markup has changed or every listing request failed"
         )
 
     # Tier 2: seat maps only for bookable showtimes inside the hours.
@@ -51,12 +55,13 @@ def run(
 
     current: dict[str, list[str]] = {}
     pairs_by_showtime: dict[str, tuple[SeatPair, ...]] = {}
+    seatmap_successes = 0
 
     for showtime in wanted:
         key = str(showtime.showtime_id)
         try:
             seats = parse.parse_seats(fetch.get(showtime.seatmap_url))
-        except Exception as exc:
+        except (OSError, requests.RequestException, ValueError) as exc:
             print(
                 f"WARNING: seat map fetch/parse failed for showtime {key} "
                 f"({showtime.display_time}): {exc}"
@@ -71,6 +76,23 @@ def run(
         pairs = match.find_pairs(seats)
         current[key] = [pair.key for pair in pairs]
         pairs_by_showtime[key] = tuple(pairs)
+        seatmap_successes += 1
+
+    if wanted and seatmap_successes == 0:
+        raise RuntimeError(
+            f"all {len(wanted)} seat map(s) failed to fetch/parse — "
+            "either the markup has changed or every seat-map request failed"
+        )
+
+    # A failed tier-1 listing date means any showtime only ever listed on that
+    # date is entirely absent from `current`, not merely carried forward with
+    # a stale value. Without this, save_state would prune it as if it had
+    # genuinely passed, and the next successful scan would see all of its
+    # pairs as brand new and re-alert spuriously.
+    if listing_failed and previous:
+        for key, value in previous.items():
+            if key not in current:
+                current[key] = value
 
     if first_run:
         state.save_state(state_path, current)

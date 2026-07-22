@@ -128,8 +128,9 @@ def test_only_fetches_seat_maps_for_qualifying_showtimes(monkeypatch, tmp_path):
 
 
 def test_same_showtime_listed_on_two_dates_is_fetched_once(monkeypatch, tmp_path):
-    # Late-night showings appear on the previous day's listing as well as their
-    # own, so the same showtime_id arrives twice. It must not be fetched twice.
+    # The same showtime_id can legitimately be returned by more than one
+    # date's listing page, so the same showtime_id arrives twice. It must not
+    # be fetched twice.
     seatmap_calls = []
 
     def fake_get(url, params=None):
@@ -214,6 +215,199 @@ def test_only_newly_opened_pairs_are_emailed(monkeypatch, tmp_path):
     subject, body = sent[0]
     assert "Row G" in body
     assert "Row F" not in body
+
+
+def _listing_with_showtimes(entries):
+    """Build a minimal listing page with one <div class="showtime"> per entry.
+
+    Each entry is (showtime_id, iso_date, hhmm_24h, display_text).
+    """
+    divs = []
+    for showtime_id, iso_date, hhmm, display in entries:
+        divs.append(f"""
+        <div class="showtime" data-print-type-name="Imax 70mm">
+          <a class="showtime-link"
+             href="/TicketSeatMap/?TheaterId=276&ShowtimeId={showtime_id}&CinemarkMovieId=104867&Showtime={iso_date}T{hhmm}:00">
+            {display}
+          </a>
+        </div>
+        """)
+    return "<html><body>" + "".join(divs) + "</body></html>"
+
+
+def test_failed_send_does_not_advance_state(monkeypatch, tmp_path):
+    # Reverting the fix (saving state before sending, or removing the
+    # try/except that lets send failures propagate) would make this test
+    # pass a state file that has already advanced past the pre-send contents.
+    path = str(tmp_path / "state.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 0)
+
+    base = load("seatmap_604612_nearly_sold_out.html")
+    listing = load("listing_2026-08-05.html")
+    monkeypatch.setattr(
+        main.fetch,
+        "get",
+        lambda url, params=None: base if "TicketSeatMap" in url else listing,
+    )
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: None)
+
+    # First run: sold out, seeds state.
+    main.run("pw", state_path=path, today=date(2026, 8, 5))
+    pre_send_contents = Path(path).read_text()
+
+    # Second run: a pair opens, so send_email would be invoked — but it raises.
+    injected = make_available(make_available(base, "row6col12"), "row6col13")
+    monkeypatch.setattr(
+        main.fetch,
+        "get",
+        lambda url, params=None: injected if "TicketSeatMap" in url else listing,
+    )
+
+    def boom(*a):
+        raise RuntimeError("smtp exploded")
+
+    monkeypatch.setattr(main.notify, "send_email", boom)
+
+    with pytest.raises(RuntimeError, match="smtp exploded"):
+        main.run("pw", state_path=path, today=date(2026, 8, 5))
+
+    assert Path(path).read_text() == pre_send_contents
+
+
+def test_one_failing_listing_date_does_not_abort_scan(monkeypatch, tmp_path):
+    # Reverting tier-1's per-date try/except would let the Aug 5 failure
+    # propagate out of run() instead of being isolated.
+    path = str(tmp_path / "s.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 1)  # scans Aug 5 and Aug 6
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: None)
+
+    aug6_listing = _listing_with_showtimes(
+        [(900001, "2026-08-06", "12:00", "12:00pm")]
+    )
+    seatmap = load("seatmap_604612_nearly_sold_out.html")
+
+    def fake_get(url, params=None):
+        if "TicketSeatMap" in url:
+            return seatmap
+        if params and params.get("showDate") == "2026-08-05":
+            raise ValueError("markup changed for this date")
+        return aug6_listing
+
+    monkeypatch.setattr(main.fetch, "get", fake_get)
+
+    main.run("pw", state_path=path, today=date(2026, 8, 5))
+
+    assert Path(path).exists()
+    saved = json.loads(Path(path).read_text())
+    assert "900001" in saved
+
+
+def test_one_failing_seatmap_carries_previous_entry_forward(monkeypatch, tmp_path):
+    # Reverting the tier-2 carry-forward (dropping the failed key instead of
+    # re-using `previous[key]`) would make the entry vanish from saved state.
+    path = str(tmp_path / "s.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 0)
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: None)
+
+    listing = _listing_with_showtimes(
+        [
+            (900001, "2026-08-05", "11:30", "11:30am"),
+            (900002, "2026-08-05", "15:15", "3:15pm"),
+        ]
+    )
+    sold_out = load("seatmap_604612_nearly_sold_out.html")
+    open_pair = make_available(
+        make_available(sold_out, "row6col12"), "row6col13"
+    )
+
+    def fake_get_run1(url, params=None):
+        if "ShowtimeId=900001" in url:
+            return open_pair
+        if "TicketSeatMap" in url:
+            return sold_out
+        return listing
+
+    monkeypatch.setattr(main.fetch, "get", fake_get_run1)
+    main.run("pw", state_path=path, today=date(2026, 8, 5))
+
+    saved_run1 = json.loads(Path(path).read_text())
+    assert saved_run1["900001"], "showtime 900001 should have a qualifying pair"
+
+    def fake_get_run2(url, params=None):
+        if "ShowtimeId=900001" in url:
+            raise ValueError("seat map markup changed")
+        if "TicketSeatMap" in url:
+            return sold_out
+        return listing
+
+    monkeypatch.setattr(main.fetch, "get", fake_get_run2)
+    main.run("pw", state_path=path, today=date(2026, 8, 5))
+
+    saved_run2 = json.loads(Path(path).read_text())
+    assert saved_run2["900001"] == saved_run1["900001"]
+
+
+def test_total_tier2_failure_raises(monkeypatch, tmp_path):
+    # Without the F1 guard, a total seat-map wipeout returns 0 silently.
+    path = str(tmp_path / "s.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 0)
+
+    listing = _listing_with_showtimes(
+        [(900001, "2026-08-05", "11:30", "11:30am")]
+    )
+
+    def fake_get(url, params=None):
+        if "TicketSeatMap" in url:
+            raise ValueError("seat map markup changed")
+        return listing
+
+    monkeypatch.setattr(main.fetch, "get", fake_get)
+
+    with pytest.raises(RuntimeError, match="seat map"):
+        main.run("pw", state_path=path, today=date(2026, 8, 5))
+
+
+def test_tier1_partial_failure_does_not_prune_unseen_showtimes(monkeypatch, tmp_path):
+    # Reverting the F3 carry-forward would let save_state prune showtime
+    # 900001 the moment its only listing date fails to fetch/parse.
+    path = str(tmp_path / "s.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 1)  # scans Aug 5 and Aug 6
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: None)
+
+    aug5_listing = _listing_with_showtimes(
+        [(900001, "2026-08-05", "12:00", "12:00pm")]
+    )
+    aug6_listing = _listing_with_showtimes(
+        [(900002, "2026-08-06", "12:00", "12:00pm")]
+    )
+    seatmap = load("seatmap_604612_nearly_sold_out.html")
+
+    def fake_get_run1(url, params=None):
+        if "TicketSeatMap" in url:
+            return seatmap
+        if params and params.get("showDate") == "2026-08-05":
+            return aug5_listing
+        return aug6_listing
+
+    monkeypatch.setattr(main.fetch, "get", fake_get_run1)
+    main.run("pw", state_path=path, today=date(2026, 8, 5))
+
+    saved_run1 = json.loads(Path(path).read_text())
+    assert "900001" in saved_run1
+
+    def fake_get_run2(url, params=None):
+        if "TicketSeatMap" in url:
+            return seatmap
+        if params and params.get("showDate") == "2026-08-05":
+            raise ValueError("markup changed for Aug 5")
+        return aug6_listing
+
+    monkeypatch.setattr(main.fetch, "get", fake_get_run2)
+    main.run("pw", state_path=path, today=date(2026, 8, 5))
+
+    saved_run2 = json.loads(Path(path).read_text())
+    assert "900001" in saved_run2
+    assert saved_run2["900001"] == saved_run1["900001"]
 
 
 def test_alerts_sorted_by_starts_at(monkeypatch, tmp_path):
