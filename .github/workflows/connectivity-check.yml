@@ -1,0 +1,19 @@
+name: connectivity-check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Cinemark listing from runner
+        run: |
+          UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+          code=$(curl -s -o /tmp/out.html -w "%{http_code}" -A "$UA" --max-time 30 \
+            "https://www.cinemark.com/theatres/il-woodridge/cinemark-seven-bridges-and-imax?showDate=2026-08-05")
+          echo "HTTP status: $code"
+          echo "Bytes: $(wc -c < /tmp/out.html)"
+          echo "IMAX 70mm blocks found: $(grep -c 'data-print-type-name="Imax 70mm"' /tmp/out.html || true)"
+          head -c 400 /tmp/out.html
+          test "$code" = "200"
