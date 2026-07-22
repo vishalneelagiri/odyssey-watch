@@ -29,7 +29,7 @@ def run(
         try:
             html = fetch.get(config.LISTING_URL, {"showDate": day.isoformat()})
             showtimes.extend(parse.parse_showtimes(html))
-        except (OSError, requests.RequestException, ValueError) as exc:
+        except (OSError, requests.RequestException, ValueError, KeyError) as exc:
             listing_failed = True
             print(f"WARNING: listing fetch/parse failed for {day.isoformat()}: {exc}")
 
@@ -61,7 +61,7 @@ def run(
         key = str(showtime.showtime_id)
         try:
             seats = parse.parse_seats(fetch.get(showtime.seatmap_url))
-        except (OSError, requests.RequestException, ValueError) as exc:
+        except (OSError, requests.RequestException, ValueError, KeyError) as exc:
             print(
                 f"WARNING: seat map fetch/parse failed for showtime {key} "
                 f"({showtime.display_time}): {exc}"
