@@ -144,6 +144,16 @@ def test_rejects_non_bookable_showtime():
     assert not showtime_in_window(Showtime(state="sold_out", display_time="10:50pm"), TODAY)
 
 
+def test_rejects_bookable_with_no_start_time():
+    showtime = Showtime(state="bookable", display_time="x")
+    assert not showtime_in_window(showtime, TODAY)
+
+
+def test_rejects_sold_out_with_valid_start_time():
+    showtime = showtime_at(2026, 8, 5, 15, 15, state="sold_out")
+    assert not showtime_in_window(showtime, TODAY)
+
+
 def test_filters_real_listing_to_three_showtimes():
     # Aug 5 lists 7:45am, 11:30am, 3:15pm, 7:00pm, 10:45pm.
     # Exactly the middle three survive: 7:00pm is the inclusive upper boundary.
