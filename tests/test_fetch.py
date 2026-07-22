@@ -79,3 +79,63 @@ def test_raises_after_max_retries(monkeypatch):
 
     with pytest.raises(ConnectionError):
         fetch.get("https://example.test/")
+
+
+def test_4xx_fails_fast_without_retry(monkeypatch):
+    calls = {"n": 0}
+
+    def blocked(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        return FakeResponse(status_code=403)
+
+    monkeypatch.setattr(fetch.requests, "get", blocked)
+    monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError):
+        fetch.get("https://example.test/")
+    assert calls["n"] == 1
+
+
+def test_5xx_is_retried(monkeypatch):
+    calls = {"n": 0}
+
+    def failing(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        return FakeResponse(status_code=500)
+
+    monkeypatch.setattr(fetch.requests, "get", failing)
+    monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError):
+        fetch.get("https://example.test/")
+    assert calls["n"] == config.MAX_RETRIES
+
+
+def test_programming_error_propagates_without_retry(monkeypatch):
+    calls = {"n": 0}
+
+    def buggy(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        raise TypeError("bug")
+
+    monkeypatch.setattr(fetch.requests, "get", buggy)
+    monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
+
+    with pytest.raises(TypeError):
+        fetch.get("https://example.test/")
+    assert calls["n"] == 1
+
+
+def test_no_sleep_after_final_failed_attempt(monkeypatch):
+    slept = []
+
+    def always_fails(url, params=None, headers=None, timeout=None):
+        raise ConnectionError("boom")
+
+    monkeypatch.setattr(fetch.requests, "get", always_fails)
+    monkeypatch.setattr(fetch.time, "sleep", lambda s: slept.append(s))
+
+    with pytest.raises(ConnectionError):
+        fetch.get("https://example.test/")
+
+    assert len(slept) == config.MAX_RETRIES - 1
