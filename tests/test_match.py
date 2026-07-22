@@ -1,8 +1,10 @@
+from datetime import date, datetime
 from pathlib import Path
 
-from src.match import find_pairs
-from src.models import Seat
-from src.parse import parse_seats
+from src import config
+from src.match import find_pairs, showtime_in_window
+from src.models import Seat, Showtime
+from src.parse import parse_seats, parse_showtimes
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -81,3 +83,72 @@ def test_real_fixtures_yield_no_pairs():
     ):
         html = (FIXTURES / name).read_text(encoding="utf-8", errors="replace")
         assert find_pairs(parse_seats(html)) == []
+
+
+def showtime_at(year, month, day, hour, minute, state="bookable"):
+    return Showtime(
+        state=state,
+        display_time="x",
+        showtime_id=1,
+        movie_id=1,
+        starts_at=datetime(year, month, day, hour, minute, tzinfo=config.TZ),
+        seatmap_url="https://example.test/",
+    )
+
+
+TODAY = date(2026, 8, 1)
+
+
+def test_accepts_showtime_inside_hours():
+    assert showtime_in_window(showtime_at(2026, 8, 5, 15, 15), TODAY)
+
+
+def test_accepts_exactly_11am_lower_boundary():
+    assert showtime_in_window(showtime_at(2026, 8, 5, 11, 0), TODAY)
+
+
+def test_accepts_exactly_7pm_upper_boundary():
+    assert showtime_in_window(showtime_at(2026, 8, 5, 19, 0), TODAY)
+
+
+def test_rejects_early_morning_showtime():
+    assert not showtime_in_window(showtime_at(2026, 8, 5, 7, 45), TODAY)
+
+
+def test_rejects_late_night_showtime():
+    assert not showtime_in_window(showtime_at(2026, 8, 5, 22, 45), TODAY)
+
+
+def test_rejects_after_midnight_showtime():
+    # The 2:40am case that motivates timezone-aware handling.
+    assert not showtime_in_window(showtime_at(2026, 8, 5, 2, 40), TODAY)
+
+
+def test_rejects_date_before_today():
+    assert not showtime_in_window(showtime_at(2026, 7, 31, 15, 0), TODAY)
+
+
+def test_accepts_last_day_of_window():
+    last_day = date(2026, 8, 1 + config.WINDOW_DAYS)
+    showtime = showtime_at(last_day.year, last_day.month, last_day.day, 15, 0)
+    assert showtime_in_window(showtime, TODAY)
+
+
+def test_rejects_day_after_window_ends():
+    past_end = date(2026, 8, 1 + config.WINDOW_DAYS + 1)
+    showtime = showtime_at(past_end.year, past_end.month, past_end.day, 15, 0)
+    assert not showtime_in_window(showtime, TODAY)
+
+
+def test_rejects_non_bookable_showtime():
+    assert not showtime_in_window(Showtime(state="sold_out", display_time="10:50pm"), TODAY)
+
+
+def test_filters_real_listing_to_three_showtimes():
+    # Aug 5 lists 7:45am, 11:30am, 3:15pm, 7:00pm, 10:45pm.
+    # Exactly the middle three survive: 7:00pm is the inclusive upper boundary.
+    # Sorted because DOM order is not guaranteed chronological — late-night
+    # showings render in a separate showtimeMovieTimes--lateNight subtree.
+    html = (FIXTURES / "listing_2026-08-05.html").read_text(encoding="utf-8", errors="replace")
+    kept = [s for s in parse_showtimes(html) if showtime_in_window(s, date(2026, 8, 1))]
+    assert sorted(s.display_time for s in kept) == sorted(["11:30am", "3:15pm", "7:00pm"])
