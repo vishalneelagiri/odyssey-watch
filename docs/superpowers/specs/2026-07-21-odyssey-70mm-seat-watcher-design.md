@@ -77,10 +77,15 @@ SCREEN
 
 Rows A–D form the narrow front section; E–K is full-width stadium seating. Row letters skip `I`.
 
-**Two parsing hazards, both confirmed present in the fixtures:**
+**Screen orientation is verified, not assumed.** The markup renders `<div class="screenLabel">Screen</div>` above row A, so row A is nearest the screen and K is farthest. Rows F–K are therefore genuinely the back half. This was checked explicitly because inverting it would silently target the worst seats in the house.
+
+**Three parsing hazards, all confirmed present in the fixtures:**
 
 1. **Two rows are lettered `E`** — one is an all-blank walkway spacer. Row letter is therefore *not* a unique key; parsing must key on physical row index.
 2. **Rows D and K contain gaps** and `seatType` values of `companion` and `wheelchair` alongside `seat`.
+3. **BeautifulSoup lowercases attribute names.** `seatType` must be read as `seattype`, `showtimeId` as `showtimeid`. Reading the camelCase name returns `None` and silently yields zero seats.
+
+**Only bookable showtimes carry a `ShowtimeId`.** Sold-out and past showtimes render as bare `<p>` elements with display text only. This is not a problem: the system never needs to act on them, and the moment one becomes bookable it gains an ID. Tier 1 counts them for sanity-checking only.
 
 ## Matching rule
 
@@ -89,7 +94,10 @@ A **seat** qualifies when all hold:
 - `seatType == "seat"` (excludes `companion`, `wheelchair`)
 - `available == "True"`
 - row letter ∈ `{F, G, H, J, K}`
-- physical column ∈ `[9, 17]` — the center third of the 27-column grid
+
+There is deliberately **no column restriction**. This release is close to fully sold out — both captured seat maps contain zero available seats anywhere in rows F–K — so narrowing to the center third would mean alerting on almost nothing. The entire back half is in scope, edge seats included. A skewed view from column 2 in row H beats not seeing the film in 70mm.
+
+The column range remains a single config constant (`MIN_COL`/`MAX_COL`, currently `0`–`26`, the full grid width) so the zone can be tightened later without touching logic if alerts turn out to be plentiful rather than rare.
 
 A **pair** qualifies when two qualifying seats share a physical row and their column indices differ by exactly 1.
 
@@ -99,6 +107,17 @@ A **showtime** qualifies when:
 - start time falls within **11:00–19:00 inclusive**, `America/Chicago`
 - date falls within **today → today + 21 days**, `America/Chicago`
 - all days of the week are eligible
+
+### Showtimes vary by day — nothing about the schedule is assumed
+
+Observed on 2026-07-21: Jul 25 had 2 IMAX 70mm showtimes, Aug 5 had 5 (7:45am, 11:30am, 3:15pm, 7:00pm, 10:45pm), and today had 6. There is no repeating daily pattern.
+
+The system therefore never models a schedule. Tier 1 fetches **each date's listing independently** and reads whatever showtimes are actually published for that date, applying the time filter per showtime. Consequences that follow, and which the implementation must preserve:
+
+- No showtime list, count, or clock time is ever hardcoded or cached between dates.
+- Weeks that have not been released yet simply return few or no showtimes; they populate on their own once Cinemark publishes them, with no code change and no redeploy.
+- A showtime that appears mid-window is treated as new and gets its seat map checked on the very next scan.
+- The time filter is applied to each showtime's own start time, so a day with only a 7:45am and a 10:45pm show correctly contributes nothing.
 
 Timezone is explicit throughout. GitHub Actions runners are UTC while showtimes are Central; the sampled 2:40am showtime is exactly the date-boundary case that produces off-by-one errors.
 
@@ -148,11 +167,16 @@ Real HTML fixtures captured 2026-07-21 are committed to `tests/fixtures/`:
 
 | Fixture | What it exercises |
 |---|---|
-| `seatmap_604612_nearly_sold_out.html` | 241 seats, 4 available, one genuine adjacent pair in row D; both `E` rows; wheelchair/companion types |
-| `listing_today_with_soldout.html` | all three showtime states including a real `soldOut` |
-| `listing_2026-08-05.html` | future-date listing, 5 IMAX 70mm showtimes |
+| `seatmap_604612_nearly_sold_out.html` | 241 grid cells, 227 regular seats, **0 available regular seats**; the only 4 available cells are `wheelchair`. Both `E` rows present. The critical wheelchair-exclusion case. |
+| `seatmap_601707_has_availability.html` | 19 available regular seats, all in rows A/B. Rows F–K fully taken, so it must yield **zero** qualifying pairs — the "available but wrong location" case. |
+| `listing_today_with_soldout.html` | 6 IMAX 70mm showtimes: 1 bookable, 1 `soldOut`, 4 `past` |
+| `listing_2026-08-05.html` | 5 bookable IMAX 70mm showtimes at 7:45am, 11:30am, 3:15pm, 7:00pm, 10:45pm — exercises the time filter, including 7:00pm as the inclusive upper boundary (3 of 5 must survive) |
 
-Parser tests assert against these. Matcher tests use synthetic grids to cover: adjacent pair inside the zone, adjacent pair outside the zone, two available seats split by an aisle (must not match), a lone available seat, and companion/wheelchair exclusion.
+Note that both seat map fixtures correctly yield zero qualifying pairs. That is an accurate reflection of the problem — this release is sold out, and a matcher that finds a pair in either fixture is wrong. Positive matching is tested in `match.py` against synthetic `Seat` lists rather than HTML, which keeps the geometry tests deterministic and independent of Cinemark's markup.
+
+Matcher tests cover: adjacent pair in the back rows (must match), adjacent pair at the far edge of a back row (must match — no column restriction), adjacent pair in a front row (must not match), two available seats split by an aisle (must not match), a lone available seat, and wheelchair/companion exclusion.
+
+Showtime-filter tests use `listing_2026-08-05.html` and assert exactly 3 of its 5 showtimes survive (11:30am, 3:15pm, 7:00pm), confirming both boundary inclusivity at 7:00pm and rejection of 7:45am/10:45pm. A separate test asserts the two listing fixtures yield *different* showtime counts, pinning the requirement that schedules are read per-date rather than assumed uniform.
 
 ## Scheduling
 
@@ -183,7 +207,7 @@ Explicitly out of scope: automated purchasing, holding, or checkout of any kind.
 | Time window | 11:00–19:00 start, inclusive |
 | Days | all |
 | Rows | F, G, H, J, K |
-| Columns | 9–17 |
+| Columns | 0–26 (full width, no restriction) |
 | Pair size | exactly 2, adjacent |
 
 All live in `config.py` so they can be tuned without touching logic.
