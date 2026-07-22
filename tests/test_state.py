@@ -58,3 +58,43 @@ def test_showtime_absent_from_current_is_dropped():
 def test_new_pairs_output_is_sorted_for_stable_emails():
     result = new_pairs({}, {"1": ["K:3-2", "G:5-4", "H:12-11"]})
     assert result["1"] == ["G:5-4", "H:12-11", "K:3-2"]
+
+
+def test_save_state_is_atomic_on_failure(tmp_path, monkeypatch):
+    """Verify that a failed write leaves the destination untouched and no temp file behind.
+
+    Monkeypatch json.dump to raise mid-way through serialization. Assert that:
+    - The pre-existing state file still holds its original, valid content
+    - No stray temp file remains in the directory
+    """
+    path = str(tmp_path / "state.json")
+    original_data = {"601707": ["H:12-11", "G:5-4"]}
+
+    # Write original state to establish a pre-existing file.
+    save_state(path, original_data)
+
+    # Verify the file has valid content before the failure test.
+    assert load_state(path) == original_data
+
+    # Monkeypatch json.dump to raise an exception mid-way through.
+    import json as json_module
+    original_dump = json_module.dump
+
+    def failing_dump(*args, **kwargs):
+        raise RuntimeError("Simulated failure during serialization")
+
+    monkeypatch.setattr("src.state.json.dump", failing_dump)
+
+    # Attempt to save new state; this should fail.
+    try:
+        save_state(path, {"999": ["K:3-2"]})
+        assert False, "Expected RuntimeError to be raised"
+    except RuntimeError as e:
+        assert "Simulated failure" in str(e)
+
+    # Verify the original file is still intact.
+    assert load_state(path) == original_data
+
+    # Verify no temp file was left behind.
+    temp_files = [f for f in tmp_path.iterdir() if f.name.startswith("tmp")]
+    assert len(temp_files) == 0, f"Found unexpected temp files: {temp_files}"

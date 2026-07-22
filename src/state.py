@@ -1,6 +1,7 @@
 """Persistence of the previous scan, so only newly-opened pairs alert."""
 import json
 import os
+import tempfile
 
 
 def load_state(path: str) -> dict[str, list[str]] | None:
@@ -20,10 +21,41 @@ def save_state(path: str, current: dict[str, list[str]]) -> None:
 
     Showtimes absent from `current` are dropped, which prunes past showtimes
     without a separate pass.
+
+    Writes are atomic: serializes to a temporary file in the same directory,
+    then uses os.replace() to move it into place. This guarantees that if the
+    process is killed mid-write, the destination file is never left truncated.
+    os.replace() is atomic on both POSIX and Windows, and same-directory
+    placement ensures the rename never crosses a filesystem boundary.
     """
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(current, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    # Determine the directory to place the temporary file in.
+    # For bare filenames like "state.json", dirname returns ""; use "." instead.
+    directory = os.path.dirname(path) or "."
+
+    # Create temporary file in the same directory as the destination.
+    # This ensures os.replace() won't need to cross a filesystem boundary.
+    try:
+        fd, temp_path = tempfile.mkstemp(dir=directory, text=True)
+        try:
+            # Write to the temporary file descriptor.
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(current, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            # Atomically move temp file to destination.
+            os.replace(temp_path, path)
+        except Exception:
+            # Clean up temp file if serialization failed.
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+            raise
+    except Exception:
+        raise
 
 
 def new_pairs(
