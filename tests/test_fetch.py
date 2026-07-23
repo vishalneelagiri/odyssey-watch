@@ -192,6 +192,24 @@ def test_429_without_retry_after_uses_cooldown_fallback(monkeypatch):
     assert slept[0] == config.RATE_LIMIT_COOLDOWN_S
 
 
+def test_429_with_negative_retry_after_clamps_to_nonnegative(monkeypatch):
+    slept = []
+    calls = {"n": 0}
+
+    def flaky(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResponse(status_code=429, headers={"Retry-After": "-5"})
+        return FakeResponse(text="<html>ok</html>")
+
+    monkeypatch.setattr(fetch.requests, "get", flaky)
+    monkeypatch.setattr(fetch.time, "sleep", lambda s: slept.append(s))
+
+    assert fetch.get("https://example.test/") == "<html>ok</html>"
+    assert calls["n"] == 2
+    assert slept[0] >= 0
+
+
 def test_persistent_429_raises_after_max_429_retries(monkeypatch):
     calls = {"n": 0}
 

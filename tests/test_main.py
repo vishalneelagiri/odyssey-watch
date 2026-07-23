@@ -440,6 +440,11 @@ def test_include_far_false_skips_far_seatmaps(monkeypatch, tmp_path):
 
     monkeypatch.setattr(main.fetch, "get", fake_get)
 
+    # Not a first run: the first-run guard forces a complete scan regardless
+    # of include_far (see the far-seed fix), so seed empty state up front to
+    # actually exercise the near/far tiering split this test targets.
+    main.state.save_state(path, {})
+
     main.run("pw", state_path=path, today=date(2026, 8, 5), include_far=False)
 
     assert any("ShowtimeId=900001" in u for u in seatmap_calls)
@@ -507,6 +512,11 @@ def test_all_far_skipped_does_not_trip_total_failure_guard(monkeypatch, tmp_path
 
     monkeypatch.setattr(main.fetch, "get", fake_get)
 
+    # Not a first run: the first-run guard forces a complete scan regardless
+    # of include_far, so seed empty state up front to actually exercise the
+    # all-far-skipped guard this test targets.
+    main.state.save_state(path, {})
+
     result = main.run(
         "pw", state_path=path, today=date(2026, 8, 5), include_far=False
     )
@@ -548,6 +558,101 @@ def test_include_far_true_default_fetches_everything(monkeypatch, tmp_path):
 
     assert any("ShowtimeId=900001" in u for u in seatmap_calls)
     assert any("ShowtimeId=900002" in u for u in seatmap_calls)
+
+
+def test_first_run_fetches_far_seatmaps_even_when_include_far_false(monkeypatch, tmp_path):
+    # A fresh deploy has no state.json, so this is a first run. First runs
+    # must be a complete scan regardless of include_far, otherwise the seed
+    # is missing far-window keys entirely and the next include_far=True run
+    # treats every one of them as brand new.
+    path = str(tmp_path / "s.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 10)
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: None)
+
+    near_date = date(2026, 8, 5) + timedelta(days=2)   # within NEAR_WINDOW_DAYS
+    far_date = date(2026, 8, 5) + timedelta(days=10)   # beyond NEAR_WINDOW_DAYS
+
+    listings_by_date = {
+        "2026-08-05": _listing_with_showtimes(
+            [(900001, near_date.isoformat(), "12:00", "12:00pm")]
+        ),
+        far_date.isoformat(): _listing_with_showtimes(
+            [(900002, far_date.isoformat(), "12:00", "12:00pm")]
+        ),
+    }
+    seatmap = load("seatmap_604612_nearly_sold_out.html")
+    seatmap_calls = []
+
+    def fake_get(url, params=None):
+        if "TicketSeatMap" in url:
+            seatmap_calls.append(url)
+            return seatmap
+        show_date = params.get("showDate") if params else None
+        return listings_by_date.get(show_date, "<html></html>")
+
+    monkeypatch.setattr(main.fetch, "get", fake_get)
+
+    main.run("pw", state_path=path, today=date(2026, 8, 5), include_far=False)
+
+    assert any("ShowtimeId=900001" in u for u in seatmap_calls)
+    assert any("ShowtimeId=900002" in u for u in seatmap_calls), (
+        "far showtime seat map must be fetched on the first run even with "
+        "include_far=False"
+    )
+    saved = json.loads(Path(path).read_text())
+    assert "900001" in saved
+    assert "900002" in saved, "far showtime key must be present in the seeded state"
+
+
+def test_first_run_backlog_not_dumped_on_first_hourly_scan(monkeypatch, tmp_path):
+    # End-to-end regression for the reported bug: a first run under a */10
+    # schedule (include_far=False) against seat maps that already have open
+    # far-window pairs must seed those far keys and send no email. The next
+    # include_far=True run against the same availability must also send no
+    # email, since nothing is actually new — proving the far-window backlog
+    # is not dumped into a single alert.
+    path = str(tmp_path / "s.json")
+    sent = []
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 10)
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: sent.append(a))
+
+    near_date = date(2026, 8, 5) + timedelta(days=2)
+    far_date = date(2026, 8, 5) + timedelta(days=10)
+
+    listings_by_date = {
+        "2026-08-05": _listing_with_showtimes(
+            [(900001, near_date.isoformat(), "12:00", "12:00pm")]
+        ),
+        far_date.isoformat(): _listing_with_showtimes(
+            [(900002, far_date.isoformat(), "12:00", "12:00pm")]
+        ),
+    }
+    # The far showtime's seat map has an open qualifying pair (row6col12/13)
+    # already available — this is the "backlog" that must not be dumped.
+    open_pair = make_available(
+        make_available(load("seatmap_604612_nearly_sold_out.html"), "row6col12"),
+        "row6col13",
+    )
+
+    def fake_get(url, params=None):
+        if "TicketSeatMap" in url:
+            return open_pair
+        show_date = params.get("showDate") if params else None
+        return listings_by_date.get(show_date, "<html></html>")
+
+    monkeypatch.setattr(main.fetch, "get", fake_get)
+
+    # First run: */10 schedule, include_far=False. This is the first run
+    # (no state.json yet), so it must still cover far dates and seed them.
+    main.run("pw", state_path=path, today=date(2026, 8, 5), include_far=False)
+    assert sent == []
+    saved_run1 = json.loads(Path(path).read_text())
+    assert saved_run1.get("900002"), "far showtime's open pair must be seeded"
+
+    # Second run: the hourly schedule fires with include_far=True against the
+    # same unchanged availability. Nothing is new, so no email.
+    main.run("pw", state_path=path, today=date(2026, 8, 5), include_far=True)
+    assert sent == []
 
 
 def test_alerts_sorted_by_starts_at(monkeypatch, tmp_path):

@@ -17,7 +17,7 @@ def _retry_after_wait(response) -> float:
     value = response.headers.get("Retry-After")
     if value is not None:
         try:
-            return int(value)
+            return max(0, int(value))
         except (TypeError, ValueError):
             pass
     return config.RATE_LIMIT_COOLDOWN_S

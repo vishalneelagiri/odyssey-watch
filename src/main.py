@@ -53,6 +53,14 @@ def run(
 
     previous = state.load_state(state_path)
     first_run = previous is None
+    # The first run must be a complete scan so the seed is complete: a fresh
+    # deploy is almost always caught by a */10 schedule (include_far=False),
+    # and if far showtimes were skipped on that first scan, previous would
+    # have no keys for them at all — the next include_far=True run would then
+    # see every currently-open far pair as brand new and dump the entire
+    # far-window backlog into a single email. Forcing far fetches on the one
+    # first run avoids that; every subsequent scan tiers normally.
+    fetch_far = include_far or first_run
 
     current: dict[str, list[str]] = {}
     pairs_by_showtime: dict[str, tuple[SeatPair, ...]] = {}
@@ -63,7 +71,7 @@ def run(
         key = str(showtime.showtime_id)
         is_near = (showtime.starts_at.date() - today).days <= config.NEAR_WINDOW_DAYS
 
-        if not is_near and not include_far:
+        if not is_near and not fetch_far:
             # Deliberately skipped this scan (far window, tiered out) — not
             # an attempt and not a failure. Carry the previous entry forward
             # so it neither prunes nor spuriously re-alerts, and exclude it
