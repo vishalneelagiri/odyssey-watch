@@ -47,6 +47,26 @@ def format_email(alerts: list[Alert]) -> tuple[str, str]:
     return subject, "\n".join(lines)
 
 
+def format_confirmation(listed: int, checked: int) -> tuple[str, str]:
+    """Build the one-time "watcher is live" confirmation email.
+
+    Sent on the very first run to prove the email delivery path actually
+    works, long before the first real seat alert. Deliberately does not
+    start like an alert subject, so it can never be mistaken for one.
+    """
+    subject = "Odyssey 70mm watcher is live"
+    body = (
+        "The Odyssey 70mm watcher is now running.\n\n"
+        "It is watching for two adjacent available seats in the back rows "
+        "for The Odyssey in IMAX 70mm.\n\n"
+        f"This first scan listed {listed} showtime{'s' if listed != 1 else ''} "
+        f"and is checking {checked} of them.\n\n"
+        "It will email again only when a qualifying pair opens — silence "
+        "means nothing has opened yet."
+    )
+    return subject, body
+
+
 def send_email(subject: str, body: str, password: str) -> None:
     """Send via Gmail SMTP over implicit SSL."""
     if not password:

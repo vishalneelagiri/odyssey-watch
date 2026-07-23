@@ -34,15 +34,79 @@ def fake_site(monkeypatch):
 
 
 def test_first_run_seeds_state_without_emailing(fake_site, monkeypatch, tmp_path):
+    # No password (the dry-run path used before the Gmail secret exists):
+    # seed silently, send nothing.
     sent = []
     monkeypatch.setattr(main.notify, "send_email", lambda *a: sent.append(a))
     monkeypatch.setattr(main.config, "WINDOW_DAYS", 0)
     path = str(tmp_path / "state.json")
 
-    main.run("pw", state_path=path, today=date(2026, 8, 5))
+    main.run("", state_path=path, today=date(2026, 8, 5))
 
     assert sent == []
     assert Path(path).exists()
+
+
+def test_first_run_with_password_sends_confirmation_email(fake_site, monkeypatch, tmp_path):
+    sent = []
+    monkeypatch.setattr(
+        main.notify, "send_email", lambda subject, body, pw: sent.append((subject, body, pw))
+    )
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 0)
+    path = str(tmp_path / "state.json")
+
+    main.run("pw", state_path=path, today=date(2026, 8, 5))
+
+    assert len(sent) == 1
+    subject, body, pw = sent[0]
+    assert "live" in subject.lower()
+    assert not subject.startswith("Odyssey 70mm:")
+    assert pw == "pw"
+    assert Path(path).exists()
+
+
+def test_first_run_with_empty_password_sends_nothing(fake_site, monkeypatch, tmp_path):
+    sent = []
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: sent.append(a))
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 0)
+    path = str(tmp_path / "state.json")
+
+    main.run("", state_path=path, today=date(2026, 8, 5))
+
+    assert sent == []
+    assert Path(path).exists()
+
+
+def test_first_run_confirmation_send_failure_does_not_save_state(
+    fake_site, monkeypatch, tmp_path
+):
+    def boom(*a):
+        raise RuntimeError("smtp exploded")
+
+    monkeypatch.setattr(main.notify, "send_email", boom)
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 0)
+    path = str(tmp_path / "state.json")
+
+    with pytest.raises(RuntimeError, match="smtp exploded"):
+        main.run("pw", state_path=path, today=date(2026, 8, 5))
+
+    assert not Path(path).exists()
+
+
+def test_steady_state_run_sends_no_confirmation(fake_site, monkeypatch, tmp_path):
+    sent = []
+    monkeypatch.setattr(
+        main.notify, "send_email", lambda subject, body, pw: sent.append((subject, body, pw))
+    )
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 0)
+    path = str(tmp_path / "state.json")
+
+    main.run("pw", state_path=path, today=date(2026, 8, 5))
+    assert len(sent) == 1  # the confirmation from the first run
+    sent.clear()
+
+    main.run("pw", state_path=path, today=date(2026, 8, 5))
+    assert sent == []
 
 
 def test_no_email_when_nothing_new(fake_site, monkeypatch, tmp_path):
@@ -52,6 +116,7 @@ def test_no_email_when_nothing_new(fake_site, monkeypatch, tmp_path):
     path = str(tmp_path / "state.json")
 
     main.run("pw", state_path=path, today=date(2026, 8, 5))
+    sent.clear()  # discard the first-run confirmation; this test is about steady-state
     main.run("pw", state_path=path, today=date(2026, 8, 5))
 
     assert sent == []
@@ -72,7 +137,8 @@ def test_emails_when_a_new_pair_appears(monkeypatch, tmp_path):
         else load("listing_2026-08-05.html"),
     )
     main.run("pw", state_path=path, today=date(2026, 8, 5))
-    assert sent == []
+    assert len(sent) == 1  # the first-run confirmation
+    sent.clear()
 
     # Second scan: inject two adjacent available seats into row H.
     injected = load("seatmap_604612_nearly_sold_out.html").replace(
@@ -172,7 +238,10 @@ def test_first_run_with_qualifying_pairs_sends_no_email(monkeypatch, tmp_path):
 
     main.run("pw", state_path=path, today=date(2026, 8, 5))
 
-    assert sent == []
+    # Only the first-run confirmation goes out — never an alert built from
+    # the qualifying pair itself.
+    assert len(sent) == 1
+    assert "Row F" not in str(sent[0])
     assert Path(path).exists()
     saved = json.loads(Path(path).read_text())
     assert any(saved.values()), "the qualifying pair should still be in the saved state"
@@ -200,7 +269,8 @@ def test_only_newly_opened_pairs_are_emailed(monkeypatch, tmp_path):
         else load("listing_2026-08-05.html"),
     )
     main.run("pw", state_path=path, today=date(2026, 8, 5))
-    assert sent == []
+    assert len(sent) == 1  # the first-run confirmation
+    sent.clear()
 
     monkeypatch.setattr(
         main.fetch,
@@ -645,7 +715,8 @@ def test_first_run_backlog_not_dumped_on_first_hourly_scan(monkeypatch, tmp_path
     # First run: */10 schedule, include_far=False. This is the first run
     # (no state.json yet), so it must still cover far dates and seed them.
     main.run("pw", state_path=path, today=date(2026, 8, 5), include_far=False)
-    assert sent == []
+    assert len(sent) == 1  # the first-run confirmation, never an alert
+    sent.clear()
     saved_run1 = json.loads(Path(path).read_text())
     assert saved_run1.get("900002"), "far showtime's open pair must be seeded"
 
@@ -692,7 +763,8 @@ def test_alerts_sorted_by_starts_at(monkeypatch, tmp_path):
         lambda url, params=None: base if "TicketSeatMap" in url else listing_html,
     )
     main.run("pw", state_path=path, today=date(2026, 8, 5))
-    assert sent == []
+    assert len(sent) == 1  # the first-run confirmation
+    sent.clear()
 
     monkeypatch.setattr(
         main.fetch,

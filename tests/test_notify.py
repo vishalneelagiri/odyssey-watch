@@ -4,7 +4,7 @@ import pytest
 
 from src import config
 from src.models import Alert, SeatPair, Showtime
-from src.notify import format_email, send_email
+from src.notify import format_confirmation, format_email, send_email
 
 
 def make_alert(hour=15, minute=15, pairs=(("H", "12", "11"),)):
@@ -88,3 +88,17 @@ def test_send_email_uses_ssl_and_logs_in(monkeypatch):
 def test_send_email_rejects_empty_password():
     with pytest.raises(ValueError, match="password"):
         send_email("s", "b", "")
+
+
+def test_confirmation_subject_signals_live_not_alert():
+    subject, _ = format_confirmation(5, 3)
+    assert "live" in subject.lower()
+    alert_subject, _ = format_email([make_alert()])
+    assert subject != alert_subject
+    assert not subject.startswith("Odyssey 70mm:")
+
+
+def test_confirmation_body_mentions_counts():
+    _, body = format_confirmation(5, 3)
+    assert "5" in body
+    assert "3" in body

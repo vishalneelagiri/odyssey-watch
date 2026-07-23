@@ -118,8 +118,17 @@ def run(
                 current[key] = value
 
     if first_run:
+        if password:
+            # Send-before-save, mirroring the alert invariant: if the send
+            # fails (wrong/expired password), the exception must propagate
+            # with state NOT yet saved, so the run fails loudly and the next
+            # run is still a first run and retries the confirmation.
+            subject, body = notify.format_confirmation(len(showtimes), len(wanted))
+            notify.send_email(subject, body, password)
+            print("first run — confirmation email sent")
+        else:
+            print("first run — state seeded, no email sent (no password provided)")
         state.save_state(state_path, current)
-        print("first run — state seeded, no email sent")
         return 0
 
     fresh = state.new_pairs(previous or {}, current)
