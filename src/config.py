@@ -1,4 +1,5 @@
 """All tunable constants. No logic lives here."""
+import os
 from datetime import time
 from zoneinfo import ZoneInfo
 
@@ -52,8 +53,10 @@ NEAR_WINDOW_DAYS = 7
 
 STATE_PATH = "state.json"
 
-# Email
+# Email. The address is kept out of source (the repo is public) and supplied
+# at runtime via the EMAIL_ADDRESS secret; EMAIL_TO defaults to the same
+# address. Empty when unset, which is the local/dry-run case that never emails.
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
-EMAIL_FROM = "you@example.com"
-EMAIL_TO = "you@example.com"
+EMAIL_FROM = os.environ.get("EMAIL_ADDRESS", "")
+EMAIL_TO = os.environ.get("EMAIL_TO", EMAIL_FROM)

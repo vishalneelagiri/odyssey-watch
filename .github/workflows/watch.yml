@@ -26,18 +26,24 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Verify Gmail secret is set
+      - name: Verify required secrets are set
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
         run: |
           if [ -z "$GMAIL_APP_PASSWORD" ]; then
             echo "::error::GMAIL_APP_PASSWORD secret is missing or misnamed — set it in repo Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          if [ -z "$EMAIL_ADDRESS" ]; then
+            echo "::error::EMAIL_ADDRESS secret is missing or misnamed — set it in repo Settings > Secrets and variables > Actions."
             exit 1
           fi
 
       - name: Scan for seats
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
           INCLUDE_FAR: ${{ github.event.schedule == '*/10 * * * *' && 'false' || 'true' }}
         run: python -m src.main
 
