@@ -56,6 +56,8 @@ def format_confirmation(listed: int, checked: int) -> tuple[str, str]:
     """
     subject = "Odyssey 70mm watcher is live"
     body = (
+        "Set up by Vishal — you'll get an email here when 2 good seats open "
+        "for The Odyssey in IMAX 70mm at Cinemark Seven Bridges.\n\n"
         "The Odyssey 70mm watcher is now running.\n\n"
         "It is watching for two adjacent available seats in the back rows "
         "for The Odyssey in IMAX 70mm.\n\n"
