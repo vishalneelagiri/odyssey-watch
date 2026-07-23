@@ -194,6 +194,23 @@ Every successful request during discovery originated from the user's Mac on a re
 
 **3. Markup drift.** Cinemark could restructure either page. Parser failures must be loud — a scan that parses zero showtimes across all 22 dates should error rather than silently report "no seats found," which is indistinguishable from working correctly.
 
+## Rate limiting — discovered from the first live run (2026-07-22)
+
+The plan's request estimates were wrong, and the live end-to-end dry run corrected them:
+
+- **~52 showtimes are worth checking, not 3–10.** The film runs many daily 70mm showings; a full scan is ~74 requests (22 listings + ~52 seat maps), not 25–35.
+- **Cinemark rate-limits at roughly 11 requests per burst.** Measured: 11 consecutive seat-map requests at 1s spacing succeed, the 12th returns `429 Too Many Requests`. It is a Cloudflare burst limit that refills within seconds, not a ban — a single request after ~20s idle returns 200. The 429 carried no `Retry-After` header in observation.
+
+Two consequences, both addressed:
+
+**1. `429` must be retried, not failed fast.** The original `fetch.get` treated every 4xx as fail-fast. That is correct for 403/404 but wrong for 429, which explicitly means "slow down and retry". Left unfixed, the dry run silently carried-forward 39 of 52 shows as failed — partial blindness the total-failure guard does not catch because 13 succeeded. `fetch.get` now retries 429 with a cooldown, honoring `Retry-After` when present and falling back to `RATE_LIMIT_COOLDOWN_S` when absent (the common case here), capped at `MAX_429_RETRIES`. This applies to listing requests too — 22 listings alone exceed the burst ceiling.
+
+**2. Scans are tiered to reduce load.** With robust 429 backoff a full scan always *completes*, so tiering is a politeness/load optimization rather than a correctness requirement. Every 10-minute scan fetches all 22 listings plus seat maps for the **near window** (showtimes within `NEAR_WINDOW_DAYS` = 7 days), where last-minute cancellations cluster. Seat maps for the **far window** (days 8–21) are fetched once an hour.
+
+The near/far split is driven by **which cron schedule fired** (`github.event.schedule`), not by wall-clock minute. Gating on the minute would collide with the already-documented GHA cron lag/skip risk: a skipped top-of-hour run would silently starve the far window while near dates kept reporting healthy. Two cron lines (`*/10 * * * *` and `5 * * * *`) let the workflow pass `include_far` only on the hourly one; a skipped hourly run simply self-heals the next hour, and nothing about far-scheduling touches `state.json`.
+
+A deliberately-skipped far showtime becomes a **third** reason a showtime key can be absent from the current scan, alongside failed-and-carried-forward and genuinely-gone. It is handled like the fetch-failure case — the previous scan's entry is carried forward so it neither prunes nor spuriously re-alerts — and it is excluded from the total-failure guard's denominator, which fires only when seat maps were *attempted* this scan and none succeeded.
+
 ## Scope boundaries
 
 Explicitly out of scope: automated purchasing, holding, or checkout of any kind. The system observes and notifies; a human buys. Request cadence stays polite and there is no attempt to evade rate limiting or bot detection.
