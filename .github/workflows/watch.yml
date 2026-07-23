@@ -44,6 +44,7 @@ jobs:
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           INCLUDE_FAR: ${{ github.event.schedule == '*/10 * * * *' && 'false' || 'true' }}
         run: python -m src.main
 
