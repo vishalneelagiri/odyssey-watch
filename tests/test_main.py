@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -408,6 +408,146 @@ def test_tier1_partial_failure_does_not_prune_unseen_showtimes(monkeypatch, tmp_
     saved_run2 = json.loads(Path(path).read_text())
     assert "900001" in saved_run2
     assert saved_run2["900001"] == saved_run1["900001"]
+
+
+def test_include_far_false_skips_far_seatmaps(monkeypatch, tmp_path):
+    # Reverting the near/far split (fetching every wanted showtime
+    # unconditionally) would make seatmap_calls include the far showtime too.
+    path = str(tmp_path / "s.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 10)
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: None)
+
+    near_date = date(2026, 8, 5) + timedelta(days=2)   # within NEAR_WINDOW_DAYS
+    far_date = date(2026, 8, 5) + timedelta(days=10)   # beyond NEAR_WINDOW_DAYS
+
+    listings_by_date = {
+        "2026-08-05": _listing_with_showtimes(
+            [(900001, near_date.isoformat(), "12:00", "12:00pm")]
+        ),
+        far_date.isoformat(): _listing_with_showtimes(
+            [(900002, far_date.isoformat(), "12:00", "12:00pm")]
+        ),
+    }
+    seatmap = load("seatmap_604612_nearly_sold_out.html")
+    seatmap_calls = []
+
+    def fake_get(url, params=None):
+        if "TicketSeatMap" in url:
+            seatmap_calls.append(url)
+            return seatmap
+        show_date = params.get("showDate") if params else None
+        return listings_by_date.get(show_date, "<html></html>")
+
+    monkeypatch.setattr(main.fetch, "get", fake_get)
+
+    main.run("pw", state_path=path, today=date(2026, 8, 5), include_far=False)
+
+    assert any("ShowtimeId=900001" in u for u in seatmap_calls)
+    assert not any("ShowtimeId=900002" in u for u in seatmap_calls)
+
+
+def test_skipped_far_showtime_carries_previous_state_forward(monkeypatch, tmp_path):
+    # If the skip path stopped carrying `previous[key]` forward, the far
+    # showtime would vanish from saved state instead of persisting.
+    path = str(tmp_path / "s.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 10)
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: None)
+
+    far_date = date(2026, 8, 5) + timedelta(days=10)
+    listing = _listing_with_showtimes(
+        [(900002, far_date.isoformat(), "12:00", "12:00pm")]
+    )
+    sold_out = load("seatmap_604612_nearly_sold_out.html")
+    open_pair = make_available(
+        make_available(sold_out, "row6col12"), "row6col13"
+    )
+
+    # Run 1: include_far=True, showtime 900002 has an open pair, gets seeded.
+    monkeypatch.setattr(
+        main.fetch,
+        "get",
+        lambda url, params=None: open_pair if "TicketSeatMap" in url else listing,
+    )
+    main.run("pw", state_path=path, today=date(2026, 8, 5), include_far=True)
+    saved_run1 = json.loads(Path(path).read_text())
+    assert saved_run1.get("900002"), "far showtime should be seeded with its pair"
+
+    # Run 2: include_far=False — 900002's seat map must not be fetched at all,
+    # and its previous entry must survive unchanged.
+    def fake_get_run2(url, params=None):
+        if "TicketSeatMap" in url:
+            raise AssertionError("far showtime seat map must not be fetched")
+        return listing
+
+    monkeypatch.setattr(main.fetch, "get", fake_get_run2)
+    main.run("pw", state_path=path, today=date(2026, 8, 5), include_far=False)
+
+    saved_run2 = json.loads(Path(path).read_text())
+    assert saved_run2["900002"] == saved_run1["900002"]
+
+
+def test_all_far_skipped_does_not_trip_total_failure_guard(monkeypatch, tmp_path):
+    # Every wanted showtime is far and include_far=False: zero seat maps are
+    # attempted, so the total-failure guard must not fire even though zero
+    # succeeded. Reverting the "attempted" tracking to the old "wanted"-based
+    # check would make this raise RuntimeError.
+    path = str(tmp_path / "s.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 10)
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: None)
+
+    far_date = date(2026, 8, 5) + timedelta(days=10)
+    listing = _listing_with_showtimes(
+        [(900002, far_date.isoformat(), "12:00", "12:00pm")]
+    )
+
+    def fake_get(url, params=None):
+        if "TicketSeatMap" in url:
+            raise AssertionError("far showtime seat map must not be fetched")
+        return listing
+
+    monkeypatch.setattr(main.fetch, "get", fake_get)
+
+    result = main.run(
+        "pw", state_path=path, today=date(2026, 8, 5), include_far=False
+    )
+    assert result == 0
+    assert Path(path).exists()
+
+
+def test_include_far_true_default_fetches_everything(monkeypatch, tmp_path):
+    # Regression guard: tiering must be off by default. Both near and far
+    # showtimes get their seat maps fetched when include_far isn't passed.
+    path = str(tmp_path / "s.json")
+    monkeypatch.setattr(main.config, "WINDOW_DAYS", 10)
+    monkeypatch.setattr(main.notify, "send_email", lambda *a: None)
+
+    near_date = date(2026, 8, 5) + timedelta(days=2)
+    far_date = date(2026, 8, 5) + timedelta(days=10)
+
+    listings_by_date = {
+        "2026-08-05": _listing_with_showtimes(
+            [(900001, near_date.isoformat(), "12:00", "12:00pm")]
+        ),
+        far_date.isoformat(): _listing_with_showtimes(
+            [(900002, far_date.isoformat(), "12:00", "12:00pm")]
+        ),
+    }
+    seatmap = load("seatmap_604612_nearly_sold_out.html")
+    seatmap_calls = []
+
+    def fake_get(url, params=None):
+        if "TicketSeatMap" in url:
+            seatmap_calls.append(url)
+            return seatmap
+        show_date = params.get("showDate") if params else None
+        return listings_by_date.get(show_date, "<html></html>")
+
+    monkeypatch.setattr(main.fetch, "get", fake_get)
+
+    main.run("pw", state_path=path, today=date(2026, 8, 5))  # include_far default
+
+    assert any("ShowtimeId=900001" in u for u in seatmap_calls)
+    assert any("ShowtimeId=900002" in u for u in seatmap_calls)
 
 
 def test_alerts_sorted_by_starts_at(monkeypatch, tmp_path):

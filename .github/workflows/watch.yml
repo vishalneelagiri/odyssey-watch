@@ -3,6 +3,7 @@ name: watch
 on:
   schedule:
     - cron: "*/10 * * * *"
+    - cron: "5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -28,6 +29,7 @@ jobs:
       - name: Scan for seats
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          INCLUDE_FAR: ${{ github.event.schedule == '*/10 * * * *' && 'false' || 'true' }}
         run: python -m src.main
 
       - name: Persist state

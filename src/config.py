@@ -40,6 +40,16 @@ REQUEST_DELAY_S = 1.0
 REQUEST_TIMEOUT_S = 30
 MAX_RETRIES = 3
 
+# Rate limiting. Cinemark (Cloudflare) returns 429 after ~11 requests in a
+# burst. 429 means "slow down and retry", unlike other 4xx which are fatal.
+RATE_LIMIT_COOLDOWN_S = 20.0   # fallback wait on 429 when no Retry-After header
+MAX_429_RETRIES = 5            # attempts specifically for 429, separate from MAX_RETRIES
+
+# Tiered scanning. Every scan checks seat maps for showtimes within this many
+# days (last-minute cancellations cluster here). Seat maps for dates beyond it
+# are checked less often, driven by which cron schedule fired — see watch.yml.
+NEAR_WINDOW_DAYS = 7
+
 STATE_PATH = "state.json"
 
 # Email

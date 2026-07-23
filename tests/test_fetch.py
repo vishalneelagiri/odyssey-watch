@@ -4,9 +4,10 @@ from src import config, fetch
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, text="<html></html>"):
+    def __init__(self, status_code=200, text="<html></html>", headers=None):
         self.status_code = status_code
         self.text = text
+        self.headers = headers if headers is not None else {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -139,3 +140,91 @@ def test_no_sleep_after_final_failed_attempt(monkeypatch):
         fetch.get("https://example.test/")
 
     assert len(slept) == config.MAX_RETRIES - 1
+
+
+def test_429_then_200_returns_body(monkeypatch):
+    calls = {"n": 0}
+
+    def flaky(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResponse(status_code=429)
+        return FakeResponse(text="<html>ok</html>")
+
+    monkeypatch.setattr(fetch.requests, "get", flaky)
+    monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
+
+    assert fetch.get("https://example.test/") == "<html>ok</html>"
+    assert calls["n"] == 2
+
+
+def test_429_honors_retry_after_header(monkeypatch):
+    slept = []
+    calls = {"n": 0}
+
+    def flaky(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResponse(status_code=429, headers={"Retry-After": "3"})
+        return FakeResponse(text="<html>ok</html>")
+
+    monkeypatch.setattr(fetch.requests, "get", flaky)
+    monkeypatch.setattr(fetch.time, "sleep", lambda s: slept.append(s))
+
+    fetch.get("https://example.test/")
+    assert slept[0] == 3
+
+
+def test_429_without_retry_after_uses_cooldown_fallback(monkeypatch):
+    slept = []
+    calls = {"n": 0}
+
+    def flaky(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResponse(status_code=429)
+        return FakeResponse(text="<html>ok</html>")
+
+    monkeypatch.setattr(fetch.requests, "get", flaky)
+    monkeypatch.setattr(fetch.time, "sleep", lambda s: slept.append(s))
+
+    fetch.get("https://example.test/")
+    assert slept[0] == config.RATE_LIMIT_COOLDOWN_S
+
+
+def test_persistent_429_raises_after_max_429_retries(monkeypatch):
+    calls = {"n": 0}
+
+    def always_429(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        return FakeResponse(status_code=429)
+
+    monkeypatch.setattr(fetch.requests, "get", always_429)
+    monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
+
+    with pytest.raises(fetch.requests.HTTPError):
+        fetch.get("https://example.test/")
+
+    assert calls["n"] == config.MAX_429_RETRIES + 1
+
+
+def test_429_does_not_consume_transport_retry_budget(monkeypatch):
+    # Several 429s followed by a transport ConnectionError should still get
+    # the full MAX_RETRIES transport attempts — the 429s must not have
+    # decremented that budget.
+    calls = {"n": 0}
+
+    def sequence(url, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return FakeResponse(status_code=429)
+        raise ConnectionError("boom")
+
+    monkeypatch.setattr(fetch.requests, "get", sequence)
+    monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
+
+    with pytest.raises(ConnectionError):
+        fetch.get("https://example.test/")
+
+    # 2 429s, then MAX_RETRIES transport attempts (all ConnectionError).
+    assert calls["n"] == 2 + config.MAX_RETRIES

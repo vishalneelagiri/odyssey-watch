@@ -13,6 +13,7 @@ def run(
     *,
     state_path: str = config.STATE_PATH,
     today: date | None = None,
+    include_far: bool = True,
 ) -> int:
     """Run one scan. Returns the number of newly-opened pairs found."""
     if today is None:
@@ -56,9 +57,23 @@ def run(
     current: dict[str, list[str]] = {}
     pairs_by_showtime: dict[str, tuple[SeatPair, ...]] = {}
     seatmap_successes = 0
+    seatmap_attempts = 0
 
     for showtime in wanted:
         key = str(showtime.showtime_id)
+        is_near = (showtime.starts_at.date() - today).days <= config.NEAR_WINDOW_DAYS
+
+        if not is_near and not include_far:
+            # Deliberately skipped this scan (far window, tiered out) — not
+            # an attempt and not a failure. Carry the previous entry forward
+            # so it neither prunes nor spuriously re-alerts, and exclude it
+            # from the total-failure guard's denominator below.
+            print(f"skipping far showtime {key} ({showtime.display_time}) this scan")
+            if previous is not None and key in previous:
+                current[key] = previous[key]
+            continue
+
+        seatmap_attempts += 1
         try:
             seats = parse.parse_seats(fetch.get(showtime.seatmap_url))
         except (OSError, requests.RequestException, ValueError, KeyError) as exc:
@@ -78,9 +93,9 @@ def run(
         pairs_by_showtime[key] = tuple(pairs)
         seatmap_successes += 1
 
-    if wanted and seatmap_successes == 0:
+    if seatmap_attempts > 0 and seatmap_successes == 0:
         raise RuntimeError(
-            f"all {len(wanted)} seat map(s) failed to fetch/parse — "
+            f"all {seatmap_attempts} seat map(s) failed to fetch/parse — "
             "either the markup has changed or every seat-map request failed"
         )
 
@@ -126,4 +141,5 @@ def run(
 
 
 if __name__ == "__main__":
-    run(os.environ.get("GMAIL_APP_PASSWORD", ""))
+    include_far = os.environ.get("INCLUDE_FAR", "true").lower() != "false"
+    run(os.environ.get("GMAIL_APP_PASSWORD", ""), include_far=include_far)
